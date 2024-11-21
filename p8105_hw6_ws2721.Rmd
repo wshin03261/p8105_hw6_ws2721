@@ -1,0 +1,8 @@
+---
+title: "p8105_hw6_ws2721"
+output: github_document
+date: "2024-11-21"
+---
+
+# Problem 1
+
