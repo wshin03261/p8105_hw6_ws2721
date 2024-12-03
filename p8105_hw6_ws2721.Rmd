@@ -4,5 +4,204 @@ output: github_document
 date: "2024-11-21"
 ---
 
+```{r}
+library(tidyverse)
+library(broom)
+library(modelr)
+library(mgcv)
+
+set.seed(1)
+```
+
 # Problem 1
 
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+download data
+
+```{r}
+weather_df = weather_df |> 
+  modelr::bootstrap(n = 5000) |> 
+  mutate(slr_m = map(strap, \(df) lm(tmax ~ tmin, data = df)),
+         slr_r = map(slr_m, broom::tidy),
+         slr_g = map(slr_m, broom::glance))
+```
+
+
+```{r}
+weather_rsq = weather_df |> 
+  select(-strap, -slr_m, -slr_r) |> 
+  unnest(slr_g) |> 
+  select(.id, r.squared)
+
+ggplot(weather_rsq, aes(x = r.squared)) +
+  geom_histogram()
+```
+
+
+# Problem 2
+
+```{r}
+
+h_data = read_csv("homicide-data.csv") |> 
+  mutate(city_state = paste(city, state, sep = ", ")) |> 
+  filter(!city_state %in% c("Dallas, TX", 
+                            "Phoenix, AZ", 
+                            "Kansas City, MO", 
+                            "Tulsa, AL")) |> 
+  filter(victim_race %in% c("White", 
+                            "Black")) |> 
+  mutate(victim_age = as.numeric(victim_age),
+         victim_race = as.factor(victim_race),
+         victim_sex = as.factor(victim_sex)) |> 
+  mutate(solved = as.factor(case_when(
+      disposition == "Closed by arrest" ~ 1,
+      disposition == "Closed without arrest" ~ 1,
+      disposition == "Open/No arrest" ~ 0
+    ))) |> 
+  drop_na(victim_age) |> 
+  filter(victim_sex != "Unknown")
+
+summary(h_data)
+```
+
+Made a data set that includes the "city_state" variable and a binary variable indicating whether the homicide is solved. Omitted the cities that is Dallas, Phoenix, Kansas City, and Tulsa. Also changed the varibles by their type and dropped all the NAs.
+
+```{r}
+baltimore_data = h_data |> 
+  filter(city_state == "Baltimore, MD")
+
+baltimore = glm(solved ~ victim_age + victim_sex + victim_race, data = baltimore_data, family = binomial())
+
+baltimore_result = broom::tidy(baltimore, conf.int = TRUE, exponentiate = TRUE)
+baltimore_result |> 
+  filter(term == "victim_sexMale")
+```
+
+The adjusted odds ratio for solving homicides comparing male victims to female victims in blatimore is:
+
+aOR: 0.355
+95% CI: 0.267-0.468
+
+```{r}
+all_city = h_data |> 
+  group_by(city_state) |> 
+  nest() |> 
+  mutate(
+    model = map(data, ~glm(solved ~ victim_age + victim_sex + victim_race, data = ., family = binomial())),
+    results = map(model, ~broom::tidy(., conf.int = TRUE, exponentiate = TRUE))
+  ) |> 
+  unnest(cols = results) |> 
+  filter(term == "victim_sexMale") |> 
+  select(city_state, estimate, conf.low, conf.high)
+```
+
+Ran the glm fuction for all city data and extracted the odds ratio and 95% CI for solving homicides comparing male victims to female victims.
+
+```{r}
+all_city = all_city |> 
+  mutate(city_state = factor(city_state, levels = city_state))
+
+ggplot(all_city, aes(x = reorder(city_state,estimate), y = estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  coord_flip() +
+  labs(title = "Adjusted Odds Ratios for Solving Homicides",
+       x = "City",
+       y = "Odds Ratio (Male vs Female)") +
+  theme_minimal()
+```
+
+The highest odds of male becoming a victim is Fresno, CA and the lowest odds of male becoming a victim is New York, NY.
+We could see that the population density and the size of the city doesn't directly correlates to the sex of the victim.
+
+# Problem 3
+
+```{r}
+bw = read_csv("birthweight.csv") |> 
+  mutate(
+    babysex = as.factor(babysex),
+    malform = as.factor(malform),
+    frace = as.factor(frace),
+    mrace = as.factor(mrace)
+  )
+
+summary(bw)
+```
+
+Cleaned the data and assigned the factor variables that should be a factor for analysis. Also checked the data to remove such as frace = 9 (Unknown), but there wasn't any values to remove.
+
+```{r}
+model_h = lm(
+  bwt ~ momage + mheight + delwt + smoken + gaweeks + blength + bhead + babysex,
+  data = bw)
+
+summary(model_h)
+
+bw = bw |> 
+  add_predictions(model_h) |> 
+  add_residuals(model_h)
+
+
+ggplot(bw, aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  geom_smooth(se = FALSE, method = "lm", color = "red")+
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values",
+    y = "Residuals"
+  )
+```
+
+I wanted to concentrate more on the mother's and baby's biological factor to determine the birth weight. I have included mom's biological characteristics such as age, height, and weight at delivery etc., I also added the babies gestational age and baby's length and head circumference etc.
+
+The smooth line seems to reside in the 0 mark, of the residuals indicating that the model is somewhat effective to estimate the baby's birth weight by the variables in the model. It is not that effective with babies with lower birth weight.
+
+```{r}
+cv_df = crossv_mc(bw, 100) |> 
+  mutate(train = map(train, as_tibble),
+         test = map(test, as_tibble))
+
+cv_df2 = cv_df |> 
+  mutate(
+  model_h_t = map(train, ~lm(bwt ~ momage + mheight + delwt + smoken + gaweeks + blength + bhead + babysex,
+  data = .x)),
+  model_m_t = map(train, ~lm(bwt ~ blength + gaweeks, data=.x)),
+  model_i_t = map(train, ~lm(bwt ~ bhead * blength * babysex, data = .x))) |> 
+  mutate(rmse_hypothesis = map2_dbl(model_h_t, test, rmse),
+         rmse_main = map2_dbl(model_m_t, test, rmse),
+         rmse_interaction = map2_dbl(model_i_t, test, rmse))
+```
+
+I will be creating 100 testing data sets for cross-validation.
+Then fit 3 models in to the training data set which is my hypothesis model, main effects model and interaction model.
+
+```{r}
+cv_df2 |>  
+  select(starts_with("rmse")) |>  
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin()
+```
+
+The cross validation results tells me that the including biological factors of both mother and baby is shown to be a better estimation model for baby's birth weight compared to only assessing the baby's characteristic.
+
+The rmse value of the hypothesis model was shown to be the lowest among all three models.
